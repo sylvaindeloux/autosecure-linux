@@ -473,6 +473,44 @@ if sshd -t 2>/dev/null; then
 fi
 
 if apply_config "SSH Drop-in Configuration" "$SSHD_DROPIN" "$SSHD_NEW"; then
+    # --- Handle ssh.socket (Ubuntu 24.04+) ---
+    # On systems using systemd socket activation, the port is controlled by
+    # ssh.socket, not sshd_config. We need an override for the socket too.
+    if systemctl is-active ssh.socket &>/dev/null || systemctl is-enabled ssh.socket &>/dev/null; then
+        step "Detected ssh.socket (systemd socket activation)."
+        info "Creating socket override for port ${SSH_PORT}..."
+
+        SSH_SOCKET_OVERRIDE="/etc/systemd/system/ssh.socket.d/override.conf"
+        SSH_SOCKET_NEW=$(mktemp)
+
+        cat > "$SSH_SOCKET_NEW" << SOCKEOF
+# SSH socket override — AutoSecure
+# Overrides the default ListenStream (port 22) with custom port.
+[Socket]
+ListenStream=
+ListenStream=${SSH_PORT}
+SOCKEOF
+
+        mkdir -p /etc/systemd/system/ssh.socket.d
+        if apply_config "SSH Socket Override (port ${SSH_PORT})" "$SSH_SOCKET_OVERRIDE" "$SSH_SOCKET_NEW"; then
+            run systemctl daemon-reload
+            ok "Socket override applied."
+        else
+            warn "Socket override skipped — port change may not work."
+        fi
+        rm -f "$SSH_SOCKET_NEW"
+    fi
+
+    # --- Ensure /run/sshd exists (privilege separation) ---
+    if [ ! -d /run/sshd ]; then
+        mkdir -p /run/sshd
+        chmod 0755 /run/sshd
+    fi
+    # Make it persistent across reboots
+    if [ ! -f /etc/tmpfiles.d/sshd.conf ]; then
+        echo "d /run/sshd 0755 root root -" > /etc/tmpfiles.d/sshd.conf
+    fi
+
     # --- Anti-lockout: verify key & permissions before restarting ---
     step "Anti-lockout check: verifying SSH key and permissions..."
 
@@ -522,13 +560,25 @@ if apply_config "SSH Drop-in Configuration" "$SSHD_DROPIN" "$SSHD_NEW"; then
     if [ "$LOCKOUT_OK" = false ]; then
         warn "Anti-lockout checks FAILED. Removing SSH drop-in to prevent lockout."
         rm -f "$SSHD_DROPIN"
+        if [ -f /etc/systemd/system/ssh.socket.d/override.conf ]; then
+            rm -f /etc/systemd/system/ssh.socket.d/override.conf
+            rmdir /etc/systemd/system/ssh.socket.d 2>/dev/null || true
+            run systemctl daemon-reload
+        fi
         err "Fix the issues above and re-run the script."
     else
         ok "All anti-lockout checks passed."
 
         step "Restarting SSH service..."
-        run systemctl restart sshd || run systemctl restart ssh
-        ok "SSH service restarted on port ${SSH_PORT}."
+        if systemctl is-active ssh.socket &>/dev/null || systemctl is-enabled ssh.socket &>/dev/null; then
+            run systemctl restart ssh.socket
+            # Also restart the service if it's running, so new config is picked up
+            systemctl is-active ssh.service &>/dev/null && run systemctl restart ssh.service || true
+            ok "SSH socket restarted on port ${SSH_PORT}."
+        else
+            run systemctl restart sshd || run systemctl restart ssh
+            ok "SSH service restarted on port ${SSH_PORT}."
+        fi
 
         echo
         warn "IMPORTANT: Do NOT close this session yet!"
@@ -539,7 +589,15 @@ if apply_config "SSH Drop-in Configuration" "$SSHD_DROPIN" "$SSHD_NEW"; then
         if ! confirm "Did SSH access work in another terminal?"; then
             warn "Rolling back SSH configuration..."
             rm -f "$SSHD_DROPIN"
-            run systemctl restart sshd || run systemctl restart ssh
+            if [ -f /etc/systemd/system/ssh.socket.d/override.conf ]; then
+                rm -f /etc/systemd/system/ssh.socket.d/override.conf
+                rmdir /etc/systemd/system/ssh.socket.d 2>/dev/null || true
+                run systemctl daemon-reload
+                run systemctl restart ssh.socket
+                systemctl is-active ssh.service &>/dev/null && run systemctl restart ssh.service || true
+            else
+                run systemctl restart sshd || run systemctl restart ssh
+            fi
             ok "SSH configuration reverted to defaults."
         fi
     fi
@@ -1042,7 +1100,8 @@ echo "    1. Test SSH access in a NEW terminal before closing this session:"
 echo "       ssh -p ${SSH_PORT} ${NEW_USER}@${IP_ADDR:-<server-ip>}"
 echo
 echo "    2. To revert changes:"
-echo "       - SSH:   rm ${SSHD_DROPIN} && systemctl restart ssh"
+echo "       - SSH:   rm ${SSHD_DROPIN} && rm -rf /etc/systemd/system/ssh.socket.d"
+echo "                systemctl daemon-reload && systemctl restart ssh.socket ssh.service"
 echo "       - su:    cp /etc/pam.d/su.autosecure-backup /etc/pam.d/su"
 echo "       - cores: rm /etc/security/limits.d/99-autosecure-nocore.conf"
 echo
