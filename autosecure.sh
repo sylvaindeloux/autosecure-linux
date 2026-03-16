@@ -472,7 +472,12 @@ if sshd -t 2>/dev/null; then
     fi
 fi
 
-if apply_config "SSH Drop-in Configuration" "$SSHD_DROPIN" "$SSHD_NEW"; then
+if ! apply_config "SSH Drop-in Configuration" "$SSHD_DROPIN" "$SSHD_NEW"; then
+    SSH_PORT="22"
+    warn "SSH port remains 22 (drop-in was not applied)."
+fi
+
+if [ -f "$SSHD_DROPIN" ]; then
     step "Reloading SSH service..."
     run systemctl reload sshd 2>/dev/null || run systemctl reload ssh 2>/dev/null || \
         run systemctl restart sshd 2>/dev/null || run systemctl restart ssh
@@ -490,6 +495,8 @@ if apply_config "SSH Drop-in Configuration" "$SSHD_DROPIN" "$SSHD_NEW"; then
         run systemctl reload sshd 2>/dev/null || run systemctl reload ssh 2>/dev/null || \
             run systemctl restart sshd 2>/dev/null || run systemctl restart ssh
         ok "SSH configuration reverted to defaults."
+        SSH_PORT="22"
+        warn "SSH port reset to 22 for the rest of the configuration."
     fi
 fi
 
