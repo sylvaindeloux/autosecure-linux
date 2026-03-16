@@ -303,25 +303,38 @@ fi
 # ---------------------------------------------------------------------------
 header "Step 3: Harden SSH Configuration"
 
-SSHD_CONFIG="/etc/ssh/sshd_config"
-SSHD_BACKUP="/etc/ssh/sshd_config.bak.$(date +%s)"
+SSHD_DROPIN_DIR="/etc/ssh/sshd_config.d"
+SSHD_DROPIN="${SSHD_DROPIN_DIR}/99-autosecure.conf"
 SSHD_NEW=$(mktemp)
 
-cp "$SSHD_CONFIG" "$SSHD_BACKUP"
-info "Backup saved to ${SSHD_BACKUP}"
+# Ensure the main sshd_config has an Include directive for the drop-in directory
+if [ -d "$SSHD_DROPIN_DIR" ] && grep -qE "^Include.*/etc/ssh/sshd_config\.d/" /etc/ssh/sshd_config 2>/dev/null; then
+    ok "sshd_config.d drop-in directory is supported and enabled."
+else
+    warn "sshd_config.d not supported on this system. Adding Include directive."
+    if ! grep -qE "^Include.*/etc/ssh/sshd_config\.d/" /etc/ssh/sshd_config 2>/dev/null; then
+        mkdir -p "$SSHD_DROPIN_DIR"
+        sed -i '1s/^/Include \/etc\/ssh\/sshd_config.d\/*.conf\n/' /etc/ssh/sshd_config
+        ok "Include directive added to sshd_config."
+    fi
+fi
 
-# Build a clean hardened config
+info "Original sshd_config will NOT be modified."
+info "All hardening goes into the drop-in: ${SSHD_DROPIN}"
+echo
+
+# Build the drop-in override config
 cat > "$SSHD_NEW" << SSHEOF
 # =============================================================================
-# SSH Server Configuration — Hardened by AutoSecure
+# SSH Hardening — AutoSecure (drop-in override)
 # Generated: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
+# Drop-in files in sshd_config.d are included FIRST and take precedence.
 # =============================================================================
 
 # --- Network ---
 Port ${SSH_PORT}
 AddressFamily inet
 ListenAddress 0.0.0.0
-Protocol 2
 
 # --- Authentication ---
 PermitRootLogin no
@@ -380,31 +393,31 @@ HostKeyAlgorithms ssh-ed25519,rsa-sha2-512,rsa-sha2-256
 # Use only strong host keys
 HostKey /etc/ssh/ssh_host_ed25519_key
 HostKey /etc/ssh/ssh_host_rsa_key
-
-# --- Subsystems ---
-Subsystem sftp /usr/lib/openssh/sftp-server
 SSHEOF
 
 # Validate the new config before applying
 step "Validating new SSH configuration..."
-if sshd -t -f "$SSHD_NEW" 2>/dev/null; then
-    ok "Configuration is valid."
-elif sshd -t -f "$SSHD_NEW" 2>&1 | grep -qi "sntrup761"; then
-    # Some older SSH versions don't support sntrup761, fall back
-    warn "Your SSH version may not support all key exchange algorithms. Adjusting..."
-    sed -i 's/sntrup761x25519-sha512@openssh.com,//' "$SSHD_NEW"
-    if sshd -t -f "$SSHD_NEW" 2>/dev/null; then
-        ok "Adjusted configuration is valid."
+if sshd -t 2>/dev/null; then
+    # Test with the drop-in in place
+    cp "$SSHD_NEW" "$SSHD_DROPIN"
+    if sshd -t 2>/dev/null; then
+        ok "Configuration is valid."
+        rm -f "$SSHD_DROPIN"
     else
-        warn "Config validation returned warnings (may be non-fatal)."
-        sshd -t -f "$SSHD_NEW" 2>&1 | head -5
+        VALIDATION_ERR=$(sshd -t 2>&1)
+        rm -f "$SSHD_DROPIN"
+        if echo "$VALIDATION_ERR" | grep -qi "sntrup761"; then
+            warn "Your SSH version may not support all key exchange algorithms. Adjusting..."
+            sed -i 's/sntrup761x25519-sha512@openssh.com,//' "$SSHD_NEW"
+            ok "Adjusted."
+        else
+            warn "Config validation returned warnings (may be non-fatal):"
+            echo "$VALIDATION_ERR" | head -5
+        fi
     fi
-else
-    warn "Config validation returned warnings (may be non-fatal):"
-    sshd -t -f "$SSHD_NEW" 2>&1 | head -5
 fi
 
-if apply_config "SSH Configuration Diff" "$SSHD_CONFIG" "$SSHD_NEW"; then
+if apply_config "SSH Drop-in Configuration" "$SSHD_DROPIN" "$SSHD_NEW"; then
     step "Restarting SSH service..."
     systemctl restart sshd 2>/dev/null || systemctl restart ssh 2>/dev/null
     ok "SSH service restarted on port ${SSH_PORT}."
@@ -749,8 +762,8 @@ echo
 echo "    1. Test SSH access in a NEW terminal before closing this session:"
 echo "       ssh -p ${SSH_PORT} ${NEW_USER}@${IP_ADDR:-<server-ip>}"
 echo
-echo "    2. Save the SSH config backup:"
-echo "       ${SSHD_BACKUP}"
+echo "    2. To revert SSH hardening, simply remove the drop-in:"
+echo "       rm ${SSHD_DROPIN} && systemctl restart ssh"
 echo
 echo "    3. Consider additionally:"
 echo "       - Setting up log monitoring (logwatch)"
