@@ -7,16 +7,10 @@ Automated hardening script for fresh Debian/Ubuntu servers. Run it right after y
 One-liner from your server (as root):
 
 ```bash
-curl -sL https://raw.githubusercontent.com/sylvaindeloux/autosecure-linux/main/autosecure.sh | bash
+curl -sLO https://raw.githubusercontent.com/sylvaindeloux/autosecure-linux/main/autosecure.sh && bash autosecure.sh
 ```
 
-Or if you prefer to review it first:
-
-```bash
-curl -sL -o autosecure.sh https://raw.githubusercontent.com/sylvaindeloux/autosecure-linux/main/autosecure.sh
-less autosecure.sh
-bash autosecure.sh
-```
+This downloads the script first, then runs it — required because the script is interactive and needs terminal input.
 
 ## What It Does
 

@@ -268,7 +268,7 @@ if [ -f "$AUTH_KEYS" ] && [ -s "$AUTH_KEYS" ]; then
     fi
 else
     printf "${BOLD}Paste the public SSH key for '${NEW_USER}' (one line):${NC}\n"
-    read -r PUB_KEY
+    read -r PUB_KEY < /dev/tty
 
     if [ -z "$PUB_KEY" ]; then
         err "No key provided. You MUST provide a public key — password auth will be disabled."
