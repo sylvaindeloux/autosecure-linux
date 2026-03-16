@@ -112,6 +112,38 @@ case "${ID,,}" in
 esac
 
 # ---------------------------------------------------------------------------
+# Screen session (network resilience)
+# ---------------------------------------------------------------------------
+SCREEN_SESSION="autosecure"
+SCRIPT_PATH="$(readlink -f "$0" 2>/dev/null || realpath "$0" 2>/dev/null || echo "$0")"
+
+# If already inside the screen session, skip re-launching
+if [ -z "${AUTOSECURE_IN_SCREEN:-}" ]; then
+    if command -v screen &>/dev/null; then
+        # Check for an existing detached session to resume
+        if screen -ls "$SCREEN_SESSION" 2>/dev/null | grep -q "Detached"; then
+            warn "A previous AutoSecure screen session was found (detached)."
+            info "Reattaching to it now..."
+            exec screen -r "$SCREEN_SESSION"
+        fi
+
+        info "Running inside a screen session is recommended for network resilience."
+        info "If your connection drops, reconnect and run: screen -r ${SCREEN_SESSION}"
+        echo
+        if confirm "Start a screen session?"; then
+            exec screen -S "$SCREEN_SESSION" env AUTOSECURE_IN_SCREEN=1 bash "$SCRIPT_PATH"
+        fi
+    else
+        warn "screen is not installed. If your connection drops, you'll need to re-run the script."
+        if confirm "Install screen?"; then
+            apt-get update -qq
+            apt-get install -y -qq screen
+            exec screen -S "$SCREEN_SESSION" env AUTOSECURE_IN_SCREEN=1 bash "$SCRIPT_PATH"
+        fi
+    fi
+fi
+
+# ---------------------------------------------------------------------------
 # Banner & server summary
 # ---------------------------------------------------------------------------
 clear 2>/dev/null || true
