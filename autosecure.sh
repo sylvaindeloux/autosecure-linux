@@ -417,16 +417,76 @@ if sshd -t 2>/dev/null; then
 fi
 
 if apply_config "SSH Drop-in Configuration" "$SSHD_DROPIN" "$SSHD_NEW"; then
-    step "Restarting SSH service..."
-    systemctl restart sshd 2>/dev/null || systemctl restart ssh 2>/dev/null
-    ok "SSH service restarted on port ${SSH_PORT}."
+    # --- Anti-lockout: verify key & permissions before restarting ---
+    step "Anti-lockout check: verifying SSH key and permissions..."
 
-    echo
-    warn "IMPORTANT: Do NOT close this session yet!"
-    warn "Open a NEW terminal and test: ssh -p ${SSH_PORT} ${NEW_USER}@<server-ip>"
-    warn "Only close this session after confirming the new connection works."
-    echo
-    confirm "Press y once you've verified SSH access in another terminal" || true
+    LOCKOUT_OK=true
+
+    # Check authorized_keys exists and is non-empty
+    if [ ! -s "$AUTH_KEYS" ]; then
+        err "authorized_keys is missing or empty for '${NEW_USER}' — aborting SSH restart."
+        LOCKOUT_OK=false
+    fi
+
+    # Check permissions
+    if [ "$LOCKOUT_OK" = true ]; then
+        SSH_DIR_PERMS=$(stat -c '%a' "$SSH_DIR" 2>/dev/null)
+        AUTH_KEYS_PERMS=$(stat -c '%a' "$AUTH_KEYS" 2>/dev/null)
+        SSH_DIR_OWNER=$(stat -c '%U' "$SSH_DIR" 2>/dev/null)
+
+        if [ "$SSH_DIR_PERMS" != "700" ]; then
+            err ".ssh directory permissions are ${SSH_DIR_PERMS} (expected 700)."
+            LOCKOUT_OK=false
+        fi
+        if [ "$AUTH_KEYS_PERMS" != "600" ]; then
+            err "authorized_keys permissions are ${AUTH_KEYS_PERMS} (expected 600)."
+            LOCKOUT_OK=false
+        fi
+        if [ "$SSH_DIR_OWNER" != "$NEW_USER" ]; then
+            err ".ssh directory owned by ${SSH_DIR_OWNER} (expected ${NEW_USER})."
+            LOCKOUT_OK=false
+        fi
+    fi
+
+    # Check user can sudo
+    if [ "$LOCKOUT_OK" = true ] && ! groups "$NEW_USER" | grep -qw "sudo"; then
+        err "User '${NEW_USER}' is not in the sudo group."
+        LOCKOUT_OK=false
+    fi
+
+    # Validate key format
+    if [ "$LOCKOUT_OK" = true ]; then
+        FIRST_KEY=$(head -1 "$AUTH_KEYS")
+        if ! echo "$FIRST_KEY" | grep -qE '^(ssh-(rsa|ed25519|ecdsa)|ecdsa-sha2-)'; then
+            err "First line of authorized_keys does not look like a valid SSH public key."
+            LOCKOUT_OK=false
+        fi
+    fi
+
+    if [ "$LOCKOUT_OK" = false ]; then
+        warn "Anti-lockout checks FAILED. Removing SSH drop-in to prevent lockout."
+        rm -f "$SSHD_DROPIN"
+        err "Fix the issues above and re-run the script."
+    else
+        ok "All anti-lockout checks passed."
+
+        step "Restarting SSH service..."
+        systemctl restart sshd 2>/dev/null || systemctl restart ssh 2>/dev/null
+        ok "SSH service restarted on port ${SSH_PORT}."
+
+        echo
+        warn "IMPORTANT: Do NOT close this session yet!"
+        warn "Open a NEW terminal and test: ssh -p ${SSH_PORT} ${NEW_USER}@<server-ip>"
+        warn "Only close this session after confirming the new connection works."
+        echo
+
+        if ! confirm "Did SSH access work in another terminal?"; then
+            warn "Rolling back SSH configuration..."
+            rm -f "$SSHD_DROPIN"
+            systemctl restart sshd 2>/dev/null || systemctl restart ssh 2>/dev/null
+            ok "SSH configuration reverted to defaults."
+        fi
+    fi
 fi
 
 rm -f "$SSHD_NEW"
