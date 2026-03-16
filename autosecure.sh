@@ -550,13 +550,13 @@ fi
 
 info "Planned firewall rules:"
 echo "  - Default: deny incoming, allow outgoing"
-echo "  - Allow SSH on port ${SSH_PORT}/tcp"
+echo "  - Rate-limit SSH on port ${SSH_PORT}/tcp (block after 6 attempts in 30s)"
 echo
 
 if confirm "Apply firewall rules?"; then
     run ufw default deny incoming
     run ufw default allow outgoing
-    run ufw allow "${SSH_PORT}/tcp" comment "SSH"
+    run ufw limit "${SSH_PORT}/tcp" comment "SSH"
     ok "Rules configured."
 
     step "Enabling ufw..."
@@ -755,6 +755,8 @@ bantime  = 1h
 findtime = 10m
 maxretry = 3
 banaction = ufw
+bantime.increment = true
+bantime.factor = 2
 
 [sshd]
 enabled  = true
@@ -830,10 +832,10 @@ printf "    %-35s %s\n" "SSH port:" "$SSH_PORT"
 printf "    %-35s %s\n" "SSH authentication:" "Public key only"
 printf "    %-35s %s\n" "Root login:" "Disabled"
 printf "    %-35s %s\n" "Password authentication:" "Disabled"
-printf "    %-35s %s\n" "Firewall:" "ufw (port ${SSH_PORT}/tcp only)"
+printf "    %-35s %s\n" "Firewall:" "ufw (port ${SSH_PORT}/tcp rate-limited)"
 printf "    %-35s %s\n" "Automatic security updates:" "Enabled"
 printf "    %-35s %s\n" "Kernel hardening:" "sysctl rules applied"
-printf "    %-35s %s\n" "Fail2ban:" "SSH jail active"
+printf "    %-35s %s\n" "Fail2ban:" "SSH jail active (progressive bans)"
 printf "    %-35s %s\n" "Unused protocols:" "Disabled"
 echo
 
