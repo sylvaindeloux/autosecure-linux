@@ -476,7 +476,9 @@ if apply_config "SSH Drop-in Configuration" "$SSHD_DROPIN" "$SSHD_NEW"; then
     # --- Handle ssh.socket (Ubuntu 24.04+) ---
     # On systems using systemd socket activation, the port is controlled by
     # ssh.socket, not sshd_config. We need an override for the socket too.
+    USE_SOCKET=false
     if systemctl is-active ssh.socket &>/dev/null || systemctl is-enabled ssh.socket &>/dev/null; then
+        USE_SOCKET=true
         step "Detected ssh.socket (systemd socket activation)."
         info "Creating socket override for port ${SSH_PORT}..."
 
@@ -506,100 +508,42 @@ SOCKEOF
         mkdir -p /run/sshd
         chmod 0755 /run/sshd
     fi
-    # Make it persistent across reboots
     if [ ! -f /etc/tmpfiles.d/sshd.conf ]; then
         echo "d /run/sshd 0755 root root -" > /etc/tmpfiles.d/sshd.conf
     fi
 
-    # --- Anti-lockout: verify key & permissions before restarting ---
-    step "Anti-lockout check: verifying SSH key and permissions..."
-
-    LOCKOUT_OK=true
-
-    # Check authorized_keys exists and is non-empty
-    if [ ! -s "$AUTH_KEYS" ]; then
-        err "authorized_keys is missing or empty for '${NEW_USER}' — aborting SSH restart."
-        LOCKOUT_OK=false
+    # --- Reload SSH ---
+    step "Restarting SSH service..."
+    if [ "$USE_SOCKET" = true ]; then
+        run systemctl restart ssh.socket
+        systemctl is-active ssh.service &>/dev/null && run systemctl restart ssh.service || true
+        ok "SSH socket restarted on port ${SSH_PORT}."
+    else
+        run systemctl restart sshd || run systemctl restart ssh
+        ok "SSH service restarted on port ${SSH_PORT}."
     fi
 
-    # Check permissions
-    if [ "$LOCKOUT_OK" = true ]; then
-        SSH_DIR_PERMS=$(stat -c '%a' "$SSH_DIR" 2>/dev/null)
-        AUTH_KEYS_PERMS=$(stat -c '%a' "$AUTH_KEYS" 2>/dev/null)
-        SSH_DIR_OWNER=$(stat -c '%U' "$SSH_DIR" 2>/dev/null)
+    echo
+    warn "IMPORTANT: Do NOT close this session yet!"
+    warn "Open a NEW terminal and test: ssh -p ${SSH_PORT} ${NEW_USER}@<server-ip>"
+    warn "Only close this session after confirming the new connection works."
+    echo
 
-        if [ "$SSH_DIR_PERMS" != "700" ]; then
-            err ".ssh directory permissions are ${SSH_DIR_PERMS} (expected 700)."
-            LOCKOUT_OK=false
-        fi
-        if [ "$AUTH_KEYS_PERMS" != "600" ]; then
-            err "authorized_keys permissions are ${AUTH_KEYS_PERMS} (expected 600)."
-            LOCKOUT_OK=false
-        fi
-        if [ "$SSH_DIR_OWNER" != "$NEW_USER" ]; then
-            err ".ssh directory owned by ${SSH_DIR_OWNER} (expected ${NEW_USER})."
-            LOCKOUT_OK=false
-        fi
-    fi
-
-    # Check user can sudo
-    if [ "$LOCKOUT_OK" = true ] && ! groups "$NEW_USER" | grep -qw "sudo"; then
-        err "User '${NEW_USER}' is not in the sudo group."
-        LOCKOUT_OK=false
-    fi
-
-    # Validate key format
-    if [ "$LOCKOUT_OK" = true ]; then
-        FIRST_KEY=$(head -1 "$AUTH_KEYS")
-        if ! echo "$FIRST_KEY" | grep -qE '^(ssh-(rsa|ed25519|ecdsa)|ecdsa-sha2-)'; then
-            err "First line of authorized_keys does not look like a valid SSH public key."
-            LOCKOUT_OK=false
-        fi
-    fi
-
-    if [ "$LOCKOUT_OK" = false ]; then
-        warn "Anti-lockout checks FAILED. Removing SSH drop-in to prevent lockout."
+    if ! confirm "Did SSH access work in another terminal?"; then
+        warn "Rolling back SSH configuration..."
         rm -f "$SSHD_DROPIN"
         if [ -f /etc/systemd/system/ssh.socket.d/override.conf ]; then
             rm -f /etc/systemd/system/ssh.socket.d/override.conf
             rmdir /etc/systemd/system/ssh.socket.d 2>/dev/null || true
             run systemctl daemon-reload
         fi
-        err "Fix the issues above and re-run the script."
-    else
-        ok "All anti-lockout checks passed."
-
-        step "Restarting SSH service..."
-        if systemctl is-active ssh.socket &>/dev/null || systemctl is-enabled ssh.socket &>/dev/null; then
+        if [ "$USE_SOCKET" = true ]; then
             run systemctl restart ssh.socket
-            # Also restart the service if it's running, so new config is picked up
             systemctl is-active ssh.service &>/dev/null && run systemctl restart ssh.service || true
-            ok "SSH socket restarted on port ${SSH_PORT}."
         else
             run systemctl restart sshd || run systemctl restart ssh
-            ok "SSH service restarted on port ${SSH_PORT}."
         fi
-
-        echo
-        warn "IMPORTANT: Do NOT close this session yet!"
-        warn "Open a NEW terminal and test: ssh -p ${SSH_PORT} ${NEW_USER}@<server-ip>"
-        warn "Only close this session after confirming the new connection works."
-        echo
-
-        if ! confirm "Did SSH access work in another terminal?"; then
-            warn "Rolling back SSH configuration..."
-            rm -f "$SSHD_DROPIN"
-            if [ -f /etc/systemd/system/ssh.socket.d/override.conf ]; then
-                rm -f /etc/systemd/system/ssh.socket.d/override.conf
-                rmdir /etc/systemd/system/ssh.socket.d 2>/dev/null || true
-                run systemctl daemon-reload
-                run systemctl restart ssh.socket
-                systemctl is-active ssh.service &>/dev/null && run systemctl restart ssh.service || true
-            else
-                run systemctl restart sshd || run systemctl restart ssh
-            fi
-            ok "SSH configuration reverted to defaults."
-        fi
+        ok "SSH configuration reverted to defaults."
     fi
 fi
 
