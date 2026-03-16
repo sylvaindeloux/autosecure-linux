@@ -38,18 +38,10 @@ The script is fully interactive — it shows you every change and asks for confi
 - Fresh Debian or Ubuntu server
 - Root access via SSH
 - A public SSH key ready to paste
-- `screen` (recommended — the script will offer to install it and start a session)
 
 ## Network Resilience
 
-The script offers to run inside a `screen` session. If your SSH connection drops mid-execution:
-
-```bash
-ssh root@your-server
-screen -r autosecure
-```
-
-This reattaches to the running session where the script is still waiting for input.
+The script automatically runs inside a `screen` session (installed if needed). If your SSH connection drops, just reconnect — the script detects the existing session and resumes where it left off.
 
 ## License
 
