@@ -219,10 +219,10 @@ echo
 printf "  ${DIM}Date: %s${NC}\n" "$(date)"
 echo
 
-# ---------------------------------------------------------------------------
-# Gather user input
-# ---------------------------------------------------------------------------
-header "Configuration"
+# ===========================================================================
+# PHASE 1: Configuration (no changes to the system)
+# ===========================================================================
+header "PHASE 1: Configuration"
 
 # Username
 while true; do
@@ -252,7 +252,7 @@ echo
 printf "  1. Create user ${BOLD}%s${NC} with sudo privileges\n" "$NEW_USER"
 printf "  2. Set up SSH key authentication for ${BOLD}%s${NC}\n" "$NEW_USER"
 printf "  3. Harden SSH: port ${BOLD}%s${NC}, key-only, no root, no password, no tunneling\n" "$SSH_PORT"
-printf "  4. Configure firewall (ufw) — allow port ${BOLD}%s${NC}/tcp only\n" "$SSH_PORT"
+printf "  4. Configure firewall (ufw) — rate-limit port ${BOLD}%s${NC}/tcp\n" "$SSH_PORT"
 printf "  5. Install and configure automatic security updates\n"
 printf "  6. Harden kernel parameters (sysctl)\n"
 printf "  7. Set up fail2ban with progressive banning\n"
@@ -266,6 +266,13 @@ if ! confirm "Proceed with hardening?"; then
     echo "Aborted."
     exit 0
 fi
+
+# ===========================================================================
+# PHASE 2: Apply Changes (each step asks for confirmation)
+# ===========================================================================
+header "PHASE 2: Applying Changes"
+info "Each step will ask for confirmation before applying."
+echo
 
 # ---------------------------------------------------------------------------
 # Step 1 — Create user
@@ -914,31 +921,123 @@ else
     info "AppArmor is not available on this system. Skipping."
 fi
 
-# ---------------------------------------------------------------------------
-# Final summary
-# ---------------------------------------------------------------------------
-header "Hardening Complete!"
+# ===========================================================================
+# PHASE 3: Verification
+# ===========================================================================
+header "PHASE 3: Verification"
+
+CHECKS_PASSED=0
+CHECKS_FAILED=0
+CHECKS_SKIPPED=0
+
+check_result() {
+    local name="$1" result="$2"
+    case "$result" in
+        pass)
+            printf "  ${GREEN}[PASS]${NC}  %s\n" "$name"
+            CHECKS_PASSED=$((CHECKS_PASSED + 1))
+            ;;
+        fail)
+            printf "  ${RED}[FAIL]${NC}  %s\n" "$name"
+            CHECKS_FAILED=$((CHECKS_FAILED + 1))
+            ;;
+        *)
+            printf "  ${YELLOW}[SKIP]${NC}  %s\n" "$name"
+            CHECKS_SKIPPED=$((CHECKS_SKIPPED + 1))
+            ;;
+    esac
+}
+
+# 1. User exists with sudo
+if id "$NEW_USER" &>/dev/null && groups "$NEW_USER" | grep -qw sudo; then
+    check_result "User '${NEW_USER}' with sudo" "pass"
+else
+    check_result "User '${NEW_USER}' with sudo" "fail"
+fi
+
+# 2. SSH authorized_keys
+if [ -f "$AUTH_KEYS" ] && [ -s "$AUTH_KEYS" ]; then
+    check_result "SSH authorized_keys for '${NEW_USER}'" "pass"
+else
+    check_result "SSH authorized_keys for '${NEW_USER}'" "fail"
+fi
+
+# 3. SSH hardening drop-in
+if [ -f "$SSHD_DROPIN" ]; then
+    check_result "SSH hardening drop-in" "pass"
+else
+    check_result "SSH hardening drop-in" "skip"
+fi
+
+# 4. Firewall active + rate-limited
+if ufw status 2>/dev/null | grep -q "Status: active"; then
+    if ufw status 2>/dev/null | grep -q "${SSH_PORT}.*LIMIT"; then
+        check_result "Firewall active (SSH rate-limited)" "pass"
+    else
+        check_result "Firewall active (SSH rate-limited)" "fail"
+    fi
+else
+    check_result "Firewall active (SSH rate-limited)" "skip"
+fi
+
+# 5. Unattended-upgrades
+if dpkg -l 2>/dev/null | grep -q unattended-upgrades; then
+    check_result "Automatic security updates" "pass"
+else
+    check_result "Automatic security updates" "skip"
+fi
+
+# 6. Sysctl hardening
+if [ -f "/etc/sysctl.d/99-autosecure.conf" ]; then
+    check_result "Kernel hardening (sysctl)" "pass"
+else
+    check_result "Kernel hardening (sysctl)" "skip"
+fi
+
+# 7. Fail2ban running
+if systemctl is-active fail2ban &>/dev/null; then
+    check_result "Fail2ban running (progressive bans)" "pass"
+else
+    check_result "Fail2ban running (progressive bans)" "skip"
+fi
+
+# 8. Disabled modules
+if [ -f "/etc/modprobe.d/autosecure-disable.conf" ]; then
+    check_result "Unused protocols disabled" "pass"
+else
+    check_result "Unused protocols disabled" "skip"
+fi
+
+# 9. su restriction
+if grep -qE "^auth\s+required\s+pam_wheel\.so" /etc/pam.d/su 2>/dev/null; then
+    check_result "su restricted to sudo group" "pass"
+else
+    check_result "su restricted to sudo group" "skip"
+fi
+
+# 10. Core dumps
+if [ -f "/etc/security/limits.d/99-autosecure-nocore.conf" ]; then
+    check_result "Core dumps disabled" "pass"
+else
+    check_result "Core dumps disabled" "skip"
+fi
+
+# 11. AppArmor
+if command -v aa-status &>/dev/null && aa-status --enabled 2>/dev/null; then
+    check_result "AppArmor active" "pass"
+else
+    check_result "AppArmor active" "skip"
+fi
 
 echo
-printf "${GREEN}${BOLD}  ✓ Summary of applied configurations:${NC}\n"
-echo
-printf "    %-35s %s\n" "User created:" "$NEW_USER (with sudo)"
-printf "    %-35s %s\n" "SSH port:" "$SSH_PORT"
-printf "    %-35s %s\n" "SSH authentication:" "Public key only"
-printf "    %-35s %s\n" "Root login:" "Disabled"
-printf "    %-35s %s\n" "Password authentication:" "Disabled"
-printf "    %-35s %s\n" "Firewall:" "ufw (port ${SSH_PORT}/tcp rate-limited)"
-printf "    %-35s %s\n" "Automatic security updates:" "Enabled"
-printf "    %-35s %s\n" "Kernel hardening:" "sysctl rules applied"
-printf "    %-35s %s\n" "Fail2ban:" "SSH jail active (progressive bans)"
-printf "    %-35s %s\n" "Unused protocols:" "Disabled"
-printf "    %-35s %s\n" "su restriction:" "sudo group only"
-printf "    %-35s %s\n" "Core dumps:" "Disabled"
-printf "    %-35s %s\n" "AppArmor:" "Checked/enabled"
-echo
+printf "  ${BOLD}Results: ${GREEN}%d passed${NC}, ${RED}%d failed${NC}, ${YELLOW}%d skipped${NC}\n" \
+    "$CHECKS_PASSED" "$CHECKS_FAILED" "$CHECKS_SKIPPED"
 
-printf "${YELLOW}${BOLD}  ⚠  Next steps:${NC}\n"
-echo
+# ---------------------------------------------------------------------------
+# Next steps
+# ---------------------------------------------------------------------------
+header "Next Steps"
+
 echo "    1. Test SSH access in a NEW terminal before closing this session:"
 echo "       ssh -p ${SSH_PORT} ${NEW_USER}@${IP_ADDR:-<server-ip>}"
 echo
