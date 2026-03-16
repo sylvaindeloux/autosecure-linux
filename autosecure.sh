@@ -211,7 +211,6 @@ printf "  5. Install and configure automatic security updates\n"
 printf "  6. Harden kernel parameters (sysctl)\n"
 printf "  7. Set up fail2ban for SSH brute-force protection\n"
 printf "  8. Disable unused network protocols\n"
-printf "  9. Secure shared memory\n"
 echo
 
 if ! confirm "Proceed with hardening?"; then
@@ -713,30 +712,6 @@ fi
 rm -f "$MODPROBE_NEW"
 
 # ---------------------------------------------------------------------------
-# Step 9 — Secure shared memory
-# ---------------------------------------------------------------------------
-header "Step 9: Secure Shared Memory"
-
-if grep -q "^tmpfs.*/run/shm" /etc/fstab 2>/dev/null || grep -q "^none.*/run/shm" /etc/fstab 2>/dev/null; then
-    ok "Shared memory is already secured in /etc/fstab."
-else
-    info "Adding noexec,nosuid,nodev mount options to shared memory."
-    echo
-
-    SHM_LINE="none /run/shm tmpfs defaults,ro,noexec,nosuid,nodev 0 0"
-    echo "  Will add to /etc/fstab:"
-    echo "  ${SHM_LINE}"
-    echo
-
-    if confirm "Apply shared memory hardening?"; then
-        echo "$SHM_LINE" >> /etc/fstab
-        ok "Shared memory secured."
-    else
-        warn "Shared memory hardening skipped."
-    fi
-fi
-
-# ---------------------------------------------------------------------------
 # Final summary
 # ---------------------------------------------------------------------------
 header "Hardening Complete!"
@@ -754,7 +729,6 @@ printf "    %-35s %s\n" "Automatic security updates:" "Enabled"
 printf "    %-35s %s\n" "Kernel hardening:" "sysctl rules applied"
 printf "    %-35s %s\n" "Fail2ban:" "SSH jail active"
 printf "    %-35s %s\n" "Unused protocols:" "Disabled"
-printf "    %-35s %s\n" "Shared memory:" "Secured"
 echo
 
 printf "${YELLOW}${BOLD}  ⚠  Next steps:${NC}\n"
