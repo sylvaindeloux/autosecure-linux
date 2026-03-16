@@ -12,6 +12,12 @@ curl -sLO https://raw.githubusercontent.com/sylvaindeloux/autosecure-linux/main/
 
 This downloads the script first, then runs it — required because the script is interactive and needs terminal input.
 
+For verbose output (see all command results):
+
+```bash
+curl -sLO https://raw.githubusercontent.com/sylvaindeloux/autosecure-linux/main/autosecure.sh && bash autosecure.sh -v
+```
+
 ## What It Does
 
 The script is fully interactive — it shows you every change and asks for confirmation before applying.

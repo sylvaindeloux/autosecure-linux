@@ -7,6 +7,21 @@
 set -euo pipefail
 
 # ---------------------------------------------------------------------------
+# Arguments
+# ---------------------------------------------------------------------------
+VERBOSE=false
+for arg in "$@"; do
+    case "$arg" in
+        -v|--verbose) VERBOSE=true ;;
+        -h|--help)
+            echo "Usage: $0 [-v|--verbose] [-h|--help]"
+            echo "  -v, --verbose    Show full command output"
+            exit 0
+            ;;
+    esac
+done
+
+# ---------------------------------------------------------------------------
 # Colors & helpers
 # ---------------------------------------------------------------------------
 RED='\033[0;31m'
@@ -24,6 +39,15 @@ warn()    { printf "${YELLOW}[WARN]${NC}  %s\n" "$*"; }
 err()     { printf "${RED}[ERROR]${NC} %s\n" "$*"; }
 header()  { printf "\n${BOLD}${CYAN}── %s ──${NC}\n\n" "$*"; }
 step()    { printf "${BOLD}▸ %s${NC}\n" "$*"; }
+
+# Run a command, suppressing output unless --verbose is set
+run() {
+    if [ "$VERBOSE" = true ]; then
+        "$@"
+    else
+        "$@" >/dev/null 2>&1
+    fi
+}
 
 confirm() {
     local prompt="${1:-Continue?}"
@@ -131,14 +155,14 @@ if [ -z "${AUTOSECURE_IN_SCREEN:-}" ]; then
         info "If your connection drops, reconnect and run: screen -r ${SCREEN_SESSION}"
         echo
         if confirm "Start a screen session?"; then
-            exec screen -S "$SCREEN_SESSION" env AUTOSECURE_IN_SCREEN=1 bash "$SCRIPT_PATH"
+            exec screen -S "$SCREEN_SESSION" env AUTOSECURE_IN_SCREEN=1 bash "$SCRIPT_PATH" "$@"
         fi
     else
         warn "screen is not installed. If your connection drops, you'll need to re-run the script."
         if confirm "Install screen?"; then
-            apt-get update -qq
-            apt-get install -y -qq screen
-            exec screen -S "$SCREEN_SESSION" env AUTOSECURE_IN_SCREEN=1 bash "$SCRIPT_PATH"
+            run apt-get update
+            run apt-get install -y screen
+            exec screen -S "$SCREEN_SESSION" env AUTOSECURE_IN_SCREEN=1 bash "$SCRIPT_PATH" "$@"
         fi
     fi
 fi
@@ -503,7 +527,7 @@ if apply_config "SSH Drop-in Configuration" "$SSHD_DROPIN" "$SSHD_NEW"; then
         ok "All anti-lockout checks passed."
 
         step "Restarting SSH service..."
-        systemctl restart sshd 2>/dev/null || systemctl restart ssh 2>/dev/null
+        run systemctl restart sshd || run systemctl restart ssh
         ok "SSH service restarted on port ${SSH_PORT}."
 
         echo
@@ -515,7 +539,7 @@ if apply_config "SSH Drop-in Configuration" "$SSHD_DROPIN" "$SSHD_NEW"; then
         if ! confirm "Did SSH access work in another terminal?"; then
             warn "Rolling back SSH configuration..."
             rm -f "$SSHD_DROPIN"
-            systemctl restart sshd 2>/dev/null || systemctl restart ssh 2>/dev/null
+            run systemctl restart sshd || run systemctl restart ssh
             ok "SSH configuration reverted to defaults."
         fi
     fi
@@ -530,8 +554,8 @@ header "Step 4: Configure Firewall (ufw)"
 
 if ! command -v ufw &>/dev/null; then
     step "Installing ufw..."
-    apt-get update -qq
-    apt-get install -y -qq ufw
+    run apt-get update
+    run apt-get install -y ufw
 fi
 
 info "Planned firewall rules:"
@@ -540,13 +564,13 @@ echo "  - Allow SSH on port ${SSH_PORT}/tcp"
 echo
 
 if confirm "Apply firewall rules?"; then
-    ufw default deny incoming
-    ufw default allow outgoing
-    ufw allow "${SSH_PORT}/tcp" comment "SSH"
+    run ufw default deny incoming
+    run ufw default allow outgoing
+    run ufw allow "${SSH_PORT}/tcp" comment "SSH"
     ok "Rules configured."
 
     step "Enabling ufw..."
-    echo "y" | ufw enable
+    echo "y" | run ufw enable
     ok "Firewall is active."
     ufw status verbose
 else
@@ -562,8 +586,8 @@ if dpkg -l | grep -q unattended-upgrades 2>/dev/null; then
     ok "unattended-upgrades is already installed."
 else
     step "Installing unattended-upgrades..."
-    apt-get update -qq
-    apt-get install -y -qq unattended-upgrades
+    run apt-get update
+    run apt-get install -y unattended-upgrades
 fi
 
 AUTO_UPGRADES_FILE="/etc/apt/apt.conf.d/20auto-upgrades"
@@ -618,8 +642,8 @@ if confirm "Apply automatic security updates configuration?"; then
     ok "Automatic security updates configured."
 
     # Enable the timer
-    systemctl enable --now apt-daily.timer 2>/dev/null || true
-    systemctl enable --now apt-daily-upgrade.timer 2>/dev/null || true
+    run systemctl enable --now apt-daily.timer || true
+    run systemctl enable --now apt-daily-upgrade.timer || true
     ok "Timers enabled."
 else
     warn "Automatic updates skipped."
@@ -703,7 +727,7 @@ echo
 
 if confirm "Apply kernel hardening parameters?"; then
     cp "$SYSCTL_NEW" "$SYSCTL_FILE"
-    sysctl --system > /dev/null 2>&1
+    run sysctl --system
     ok "Kernel parameters applied."
 else
     warn "Kernel hardening skipped."
@@ -721,8 +745,8 @@ if command -v fail2ban-client &>/dev/null; then
 else
     info "fail2ban monitors logs and bans IPs after repeated failed login attempts."
     if confirm "Install and configure fail2ban?"; then
-        apt-get update -qq
-        apt-get install -y -qq fail2ban
+        run apt-get update
+        run apt-get install -y fail2ban
     else
         warn "fail2ban installation skipped."
     fi
@@ -757,8 +781,8 @@ F2BEOF
 
     if confirm "Apply fail2ban configuration?"; then
         cp "$F2B_NEW" "$F2B_JAIL"
-        systemctl enable fail2ban
-        systemctl restart fail2ban
+        run systemctl enable fail2ban
+        run systemctl restart fail2ban
         ok "fail2ban configured and running."
     else
         warn "fail2ban configuration skipped."
