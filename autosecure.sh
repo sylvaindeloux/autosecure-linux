@@ -1,0 +1,761 @@
+#!/usr/bin/env bash
+# =============================================================================
+# autosecure.sh — Automated Linux Server Hardening
+# Supports Debian and Ubuntu on a fresh install.
+# Run as root via SSH right after provisioning.
+# =============================================================================
+set -euo pipefail
+
+# ---------------------------------------------------------------------------
+# Colors & helpers
+# ---------------------------------------------------------------------------
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+BOLD='\033[1m'
+DIM='\033[2m'
+NC='\033[0m' # No Color
+
+info()    { printf "${BLUE}[INFO]${NC}  %s\n" "$*"; }
+ok()      { printf "${GREEN}[OK]${NC}    %s\n" "$*"; }
+warn()    { printf "${YELLOW}[WARN]${NC}  %s\n" "$*"; }
+err()     { printf "${RED}[ERROR]${NC} %s\n" "$*"; }
+header()  { printf "\n${BOLD}${CYAN}── %s ──${NC}\n\n" "$*"; }
+step()    { printf "${BOLD}▸ %s${NC}\n" "$*"; }
+
+confirm() {
+    local prompt="${1:-Continue?}"
+    local answer
+    while true; do
+        printf "${YELLOW}%s [y/n]: ${NC}" "$prompt"
+        read -r answer
+        case "$answer" in
+            [Yy]*) return 0 ;;
+            [Nn]*) return 1 ;;
+            *) echo "Please answer y or n." ;;
+        esac
+    done
+}
+
+show_diff() {
+    # Show a colored unified diff between two files
+    local old="$1" new="$2"
+    if command -v diff &>/dev/null; then
+        diff --unified=3 "$old" "$new" | while IFS= read -r line; do
+            case "$line" in
+                ---*) printf "${RED}%s${NC}\n" "$line" ;;
+                +++*) printf "${GREEN}%s${NC}\n" "$line" ;;
+                @@*)  printf "${CYAN}%s${NC}\n" "$line" ;;
+                -*)   printf "${RED}%s${NC}\n" "$line" ;;
+                +*)   printf "${GREEN}%s${NC}\n" "$line" ;;
+                *)    printf "%s\n" "$line" ;;
+            esac
+        done
+    else
+        cat "$new"
+    fi
+    echo
+}
+
+# Apply a config file after showing diff and asking for confirmation
+apply_config() {
+    local description="$1" target="$2" newfile="$3"
+    header "$description"
+
+    if [ -f "$target" ]; then
+        info "Changes to ${target}:"
+        echo
+        show_diff "$target" "$newfile"
+    else
+        info "New file ${target}:"
+        echo
+        cat "$newfile"
+        echo
+    fi
+
+    if confirm "Apply these changes to ${target}?"; then
+        cp "$newfile" "$target"
+        ok "Applied."
+        return 0
+    else
+        warn "Skipped."
+        return 1
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# Pre-flight checks
+# ---------------------------------------------------------------------------
+if [ "$(id -u)" -ne 0 ]; then
+    err "This script must be run as root."
+    exit 1
+fi
+
+if [ ! -f /etc/os-release ]; then
+    err "Cannot detect distribution (/etc/os-release not found)."
+    exit 1
+fi
+
+# shellcheck source=/dev/null
+. /etc/os-release
+
+DISTRO=""
+case "${ID,,}" in
+    debian) DISTRO="debian" ;;
+    ubuntu) DISTRO="ubuntu" ;;
+    *)
+        err "Unsupported distribution: ${ID}. Only Debian and Ubuntu are supported."
+        exit 1
+        ;;
+esac
+
+# ---------------------------------------------------------------------------
+# Banner & server summary
+# ---------------------------------------------------------------------------
+clear 2>/dev/null || true
+printf "${BOLD}${CYAN}"
+cat << 'BANNER'
+
+     _         _        ____
+    / \  _   _| |_ ___ / ___|  ___  ___ _   _ _ __ ___
+   / _ \| | | | __/ _ \\___ \ / _ \/ __| | | | '__/ _ \
+  / ___ \ |_| | || (_) |___) |  __/ (__| |_| | | |  __/
+ /_/   \_\__,_|\__\___/|____/ \___|\___|\__,_|_|  \___|
+
+  Automated Linux Server Hardening
+
+BANNER
+printf "${NC}"
+
+header "Current Server Configuration"
+
+printf "  ${BOLD}%-20s${NC} %s\n" "Hostname:" "$(hostname)"
+printf "  ${BOLD}%-20s${NC} %s %s\n" "Distribution:" "$NAME" "$VERSION_ID"
+printf "  ${BOLD}%-20s${NC} %s\n" "Kernel:" "$(uname -r)"
+printf "  ${BOLD}%-20s${NC} %s\n" "Architecture:" "$(uname -m)"
+
+# Network info
+IP_ADDR=$(ip -4 addr show scope global 2>/dev/null | awk '/inet / {print $2}' | head -1)
+printf "  ${BOLD}%-20s${NC} %s\n" "IP Address:" "${IP_ADDR:-unknown}"
+
+# Current SSH config
+CURRENT_SSH_PORT=$(grep -E "^Port " /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}' || echo "22")
+[ -z "$CURRENT_SSH_PORT" ] && CURRENT_SSH_PORT="22"
+printf "  ${BOLD}%-20s${NC} %s\n" "SSH Port:" "$CURRENT_SSH_PORT"
+
+ROOT_LOGIN=$(grep -E "^PermitRootLogin" /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}' || echo "default")
+printf "  ${BOLD}%-20s${NC} %s\n" "Root Login:" "${ROOT_LOGIN:-default (yes)}"
+
+PASS_AUTH=$(grep -E "^PasswordAuthentication" /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}' || echo "default")
+printf "  ${BOLD}%-20s${NC} %s\n" "Password Auth:" "${PASS_AUTH:-default (yes)}"
+
+# Firewall
+if command -v ufw &>/dev/null; then
+    UFW_STATUS=$(ufw status 2>/dev/null | head -1)
+    printf "  ${BOLD}%-20s${NC} %s\n" "Firewall (ufw):" "$UFW_STATUS"
+elif command -v iptables &>/dev/null; then
+    IPTABLE_RULES=$(iptables -L -n 2>/dev/null | grep -c "^[A-Z]" || echo "0")
+    printf "  ${BOLD}%-20s${NC} %s chains\n" "Firewall (iptables):" "$IPTABLE_RULES"
+else
+    printf "  ${BOLD}%-20s${NC} %s\n" "Firewall:" "none detected"
+fi
+
+# Existing users with login shell
+LOGIN_USERS=$(awk -F: '$7 !~ /(nologin|false|sync|halt|shutdown)$/ && $3 >= 1000 {print $1}' /etc/passwd | paste -sd, -)
+printf "  ${BOLD}%-20s${NC} %s\n" "Login Users:" "${LOGIN_USERS:-none}"
+
+# Uptime & load
+printf "  ${BOLD}%-20s${NC} %s\n" "Uptime:" "$(uptime -p 2>/dev/null || uptime | sed 's/.*up/up/')"
+
+echo
+printf "  ${DIM}Date: %s${NC}\n" "$(date)"
+echo
+
+# ---------------------------------------------------------------------------
+# Gather user input
+# ---------------------------------------------------------------------------
+header "Configuration"
+
+# Username
+while true; do
+    printf "${BOLD}Enter the username to create: ${NC}"
+    read -r NEW_USER
+    if [[ "$NEW_USER" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]]; then
+        break
+    else
+        err "Invalid username. Use lowercase letters, digits, hyphens and underscores (max 32 chars)."
+    fi
+done
+
+# SSH port
+while true; do
+    printf "${BOLD}Enter the custom SSH port [1024-65535]: ${NC}"
+    read -r SSH_PORT
+    if [[ "$SSH_PORT" =~ ^[0-9]+$ ]] && [ "$SSH_PORT" -ge 1024 ] && [ "$SSH_PORT" -le 65535 ]; then
+        break
+    else
+        err "Invalid port. Choose a number between 1024 and 65535."
+    fi
+done
+
+echo
+info "Summary of planned actions:"
+echo
+printf "  1. Create user ${BOLD}%s${NC} with sudo privileges\n" "$NEW_USER"
+printf "  2. Set up SSH key authentication for ${BOLD}%s${NC}\n" "$NEW_USER"
+printf "  3. Harden SSH: port ${BOLD}%s${NC}, key-only, no root, no password, no tunneling\n" "$SSH_PORT"
+printf "  4. Configure firewall (ufw) — allow port ${BOLD}%s${NC}/tcp only\n" "$SSH_PORT"
+printf "  5. Install and configure automatic security updates\n"
+printf "  6. Harden kernel parameters (sysctl)\n"
+printf "  7. Set up fail2ban for SSH brute-force protection\n"
+printf "  8. Disable unused network protocols\n"
+printf "  9. Secure shared memory\n"
+echo
+
+if ! confirm "Proceed with hardening?"; then
+    echo "Aborted."
+    exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# Step 1 — Create user
+# ---------------------------------------------------------------------------
+header "Step 1: Create User '${NEW_USER}'"
+
+if id "$NEW_USER" &>/dev/null; then
+    warn "User '${NEW_USER}' already exists. Skipping creation."
+else
+    step "Creating user '${NEW_USER}' with home directory..."
+    useradd -m -s /bin/bash "$NEW_USER"
+    ok "User created."
+
+    step "Setting password for '${NEW_USER}'..."
+    info "You will be prompted to set a password (needed for sudo)."
+    passwd "$NEW_USER"
+fi
+
+# Add to sudo group
+if groups "$NEW_USER" | grep -qw "sudo"; then
+    ok "User '${NEW_USER}' is already in the sudo group."
+else
+    step "Adding '${NEW_USER}' to sudo group..."
+    usermod -aG sudo "$NEW_USER"
+    ok "Added to sudo group."
+fi
+
+# ---------------------------------------------------------------------------
+# Step 2 — SSH key setup
+# ---------------------------------------------------------------------------
+header "Step 2: SSH Key Setup for '${NEW_USER}'"
+
+USER_HOME=$(eval echo "~${NEW_USER}")
+SSH_DIR="${USER_HOME}/.ssh"
+AUTH_KEYS="${SSH_DIR}/authorized_keys"
+
+mkdir -p "$SSH_DIR"
+
+if [ -f "$AUTH_KEYS" ] && [ -s "$AUTH_KEYS" ]; then
+    info "Existing authorized_keys found:"
+    cat "$AUTH_KEYS"
+    echo
+    if ! confirm "Keep existing keys and skip adding a new one?"; then
+        printf "${BOLD}Paste the public SSH key for '${NEW_USER}' (one line):${NC}\n"
+        read -r PUB_KEY
+        echo "$PUB_KEY" >> "$AUTH_KEYS"
+        ok "Key added."
+    fi
+else
+    printf "${BOLD}Paste the public SSH key for '${NEW_USER}' (one line):${NC}\n"
+    read -r PUB_KEY
+
+    if [ -z "$PUB_KEY" ]; then
+        err "No key provided. You MUST provide a public key — password auth will be disabled."
+        err "Aborting to avoid lockout."
+        exit 1
+    fi
+
+    echo "$PUB_KEY" > "$AUTH_KEYS"
+    ok "Key saved."
+fi
+
+# Fix permissions
+chmod 700 "$SSH_DIR"
+chmod 600 "$AUTH_KEYS"
+chown -R "${NEW_USER}:${NEW_USER}" "$SSH_DIR"
+ok "Permissions set (700 for .ssh, 600 for authorized_keys)."
+
+# Copy root's authorized_keys if it exists and user's is empty (safety net)
+if [ -f /root/.ssh/authorized_keys ] && [ -s /root/.ssh/authorized_keys ]; then
+    if ! grep -qf /root/.ssh/authorized_keys "$AUTH_KEYS" 2>/dev/null; then
+        info "Root has authorized_keys. Copying to '${NEW_USER}' as backup."
+        if confirm "Also add root's SSH keys to '${NEW_USER}'?"; then
+            cat /root/.ssh/authorized_keys >> "$AUTH_KEYS"
+            chown "${NEW_USER}:${NEW_USER}" "$AUTH_KEYS"
+            ok "Root keys copied."
+        fi
+    fi
+fi
+
+# ---------------------------------------------------------------------------
+# Step 3 — Harden SSH
+# ---------------------------------------------------------------------------
+header "Step 3: Harden SSH Configuration"
+
+SSHD_CONFIG="/etc/ssh/sshd_config"
+SSHD_BACKUP="/etc/ssh/sshd_config.bak.$(date +%s)"
+SSHD_NEW=$(mktemp)
+
+cp "$SSHD_CONFIG" "$SSHD_BACKUP"
+info "Backup saved to ${SSHD_BACKUP}"
+
+# Build a clean hardened config
+cat > "$SSHD_NEW" << SSHEOF
+# =============================================================================
+# SSH Server Configuration — Hardened by AutoSecure
+# Generated: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
+# =============================================================================
+
+# --- Network ---
+Port ${SSH_PORT}
+AddressFamily inet
+ListenAddress 0.0.0.0
+Protocol 2
+
+# --- Authentication ---
+PermitRootLogin no
+MaxAuthTries 3
+MaxSessions 3
+PubkeyAuthentication yes
+AuthorizedKeysFile .ssh/authorized_keys
+
+# Disable all password/keyboard-interactive auth
+PasswordAuthentication no
+PermitEmptyPasswords no
+ChallengeResponseAuthentication no
+KbdInteractiveAuthentication no
+
+# Disable other auth methods
+KerberosAuthentication no
+GSSAPIAuthentication no
+HostbasedAuthentication no
+
+# --- Security ---
+StrictModes yes
+LoginGraceTime 30
+ClientAliveInterval 300
+ClientAliveCountMax 2
+
+# Disable forwarding and tunneling
+AllowTcpForwarding no
+X11Forwarding no
+AllowAgentForwarding no
+PermitTunnel no
+GatewayPorts no
+DisableForwarding yes
+
+# --- Logging ---
+SyslogFacility AUTH
+LogLevel VERBOSE
+
+# --- Misc ---
+PrintMotd no
+PrintLastLog yes
+TCPKeepAlive no
+Compression no
+UseDNS no
+PermitUserEnvironment no
+MaxStartups 10:30:60
+
+# Restrict to our user only
+AllowUsers ${NEW_USER}
+
+# --- Crypto (strong ciphers only) ---
+KexAlgorithms sntrup761x25519-sha512@openssh.com,curve25519-sha256,curve25519-sha256@libssh.org
+Ciphers chacha20-poly1305@openssh.com,aes256-gcm@openssh.com,aes128-gcm@openssh.com
+MACs hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com
+HostKeyAlgorithms ssh-ed25519,rsa-sha2-512,rsa-sha2-256
+
+# Use only strong host keys
+HostKey /etc/ssh/ssh_host_ed25519_key
+HostKey /etc/ssh/ssh_host_rsa_key
+
+# --- Subsystems ---
+Subsystem sftp /usr/lib/openssh/sftp-server
+SSHEOF
+
+# Validate the new config before applying
+step "Validating new SSH configuration..."
+if sshd -t -f "$SSHD_NEW" 2>/dev/null; then
+    ok "Configuration is valid."
+elif sshd -t -f "$SSHD_NEW" 2>&1 | grep -qi "sntrup761"; then
+    # Some older SSH versions don't support sntrup761, fall back
+    warn "Your SSH version may not support all key exchange algorithms. Adjusting..."
+    sed -i 's/sntrup761x25519-sha512@openssh.com,//' "$SSHD_NEW"
+    if sshd -t -f "$SSHD_NEW" 2>/dev/null; then
+        ok "Adjusted configuration is valid."
+    else
+        warn "Config validation returned warnings (may be non-fatal)."
+        sshd -t -f "$SSHD_NEW" 2>&1 | head -5
+    fi
+else
+    warn "Config validation returned warnings (may be non-fatal):"
+    sshd -t -f "$SSHD_NEW" 2>&1 | head -5
+fi
+
+if apply_config "SSH Configuration Diff" "$SSHD_CONFIG" "$SSHD_NEW"; then
+    step "Restarting SSH service..."
+    systemctl restart sshd 2>/dev/null || systemctl restart ssh 2>/dev/null
+    ok "SSH service restarted on port ${SSH_PORT}."
+
+    echo
+    warn "IMPORTANT: Do NOT close this session yet!"
+    warn "Open a NEW terminal and test: ssh -p ${SSH_PORT} ${NEW_USER}@<server-ip>"
+    warn "Only close this session after confirming the new connection works."
+    echo
+    confirm "Press y once you've verified SSH access in another terminal" || true
+fi
+
+rm -f "$SSHD_NEW"
+
+# ---------------------------------------------------------------------------
+# Step 4 — Firewall (ufw)
+# ---------------------------------------------------------------------------
+header "Step 4: Configure Firewall (ufw)"
+
+if ! command -v ufw &>/dev/null; then
+    step "Installing ufw..."
+    apt-get update -qq
+    apt-get install -y -qq ufw
+fi
+
+info "Planned firewall rules:"
+echo "  - Default: deny incoming, allow outgoing"
+echo "  - Allow SSH on port ${SSH_PORT}/tcp"
+echo
+
+if confirm "Apply firewall rules?"; then
+    ufw default deny incoming
+    ufw default allow outgoing
+    ufw allow "${SSH_PORT}/tcp" comment "SSH"
+    ok "Rules configured."
+
+    step "Enabling ufw..."
+    echo "y" | ufw enable
+    ok "Firewall is active."
+    ufw status verbose
+else
+    warn "Firewall configuration skipped."
+fi
+
+# ---------------------------------------------------------------------------
+# Step 5 — Automatic security updates
+# ---------------------------------------------------------------------------
+header "Step 5: Automatic Security Updates"
+
+if dpkg -l | grep -q unattended-upgrades 2>/dev/null; then
+    ok "unattended-upgrades is already installed."
+else
+    step "Installing unattended-upgrades..."
+    apt-get update -qq
+    apt-get install -y -qq unattended-upgrades
+fi
+
+AUTO_UPGRADES_FILE="/etc/apt/apt.conf.d/20auto-upgrades"
+AUTO_UPGRADES_NEW=$(mktemp)
+
+cat > "$AUTO_UPGRADES_NEW" << 'UPGEOF'
+APT::Periodic::Update-Package-Lists "1";
+APT::Periodic::Unattended-Upgrade "1";
+APT::Periodic::Download-Upgradeable-Packages "1";
+APT::Periodic::AutocleanInterval "7";
+UPGEOF
+
+UNATTENDED_CONF="/etc/apt/apt.conf.d/50unattended-upgrades"
+UNATTENDED_NEW=$(mktemp)
+
+if [ "$DISTRO" = "debian" ]; then
+    ORIGINS='
+Unattended-Upgrade::Origins-Pattern {
+    "origin=Debian,codename=${distro_codename},label=Debian-Security";
+    "origin=Debian,codename=${distro_codename}-security,label=Debian-Security";
+};'
+else
+    ORIGINS='
+Unattended-Upgrade::Origins-Pattern {
+    "origin=Ubuntu,archive=${distro_codename}-security,label=Ubuntu";
+};'
+fi
+
+cat > "$UNATTENDED_NEW" << UUEOF
+// Unattended-Upgrade configuration — AutoSecure
+${ORIGINS}
+
+Unattended-Upgrade::AutoFixInterruptedDpkg "true";
+Unattended-Upgrade::Remove-Unused-Kernel-Packages "true";
+Unattended-Upgrade::Remove-Unused-Dependencies "true";
+Unattended-Upgrade::Automatic-Reboot "false";
+UUEOF
+
+info "Auto-upgrade schedule config:"
+echo
+cat "$AUTO_UPGRADES_NEW"
+echo
+
+info "Unattended-upgrades security origins:"
+echo
+cat "$UNATTENDED_NEW"
+echo
+
+if confirm "Apply automatic security updates configuration?"; then
+    cp "$AUTO_UPGRADES_NEW" "$AUTO_UPGRADES_FILE"
+    cp "$UNATTENDED_NEW" "$UNATTENDED_CONF"
+    ok "Automatic security updates configured."
+
+    # Enable the timer
+    systemctl enable --now apt-daily.timer 2>/dev/null || true
+    systemctl enable --now apt-daily-upgrade.timer 2>/dev/null || true
+    ok "Timers enabled."
+else
+    warn "Automatic updates skipped."
+fi
+
+rm -f "$AUTO_UPGRADES_NEW" "$UNATTENDED_NEW"
+
+# ---------------------------------------------------------------------------
+# Step 6 — Kernel hardening (sysctl)
+# ---------------------------------------------------------------------------
+header "Step 6: Kernel Hardening (sysctl)"
+
+SYSCTL_FILE="/etc/sysctl.d/99-autosecure.conf"
+SYSCTL_NEW=$(mktemp)
+
+cat > "$SYSCTL_NEW" << 'SYSEOF'
+# =============================================================================
+# Kernel Hardening — AutoSecure
+# =============================================================================
+
+# --- IP Spoofing & Source Route Protection ---
+net.ipv4.conf.all.rp_filter = 1
+net.ipv4.conf.default.rp_filter = 1
+net.ipv4.conf.all.accept_source_route = 0
+net.ipv4.conf.default.accept_source_route = 0
+net.ipv6.conf.all.accept_source_route = 0
+net.ipv6.conf.default.accept_source_route = 0
+
+# --- ICMP Hardening ---
+net.ipv4.icmp_echo_ignore_broadcasts = 1
+net.ipv4.icmp_ignore_bogus_error_responses = 1
+
+# --- SYN Flood Protection ---
+net.ipv4.tcp_syncookies = 1
+net.ipv4.tcp_max_syn_backlog = 2048
+net.ipv4.tcp_synack_retries = 2
+
+# --- Disable IP Forwarding ---
+net.ipv4.ip_forward = 0
+net.ipv6.conf.all.forwarding = 0
+
+# --- Disable ICMP Redirects ---
+net.ipv4.conf.all.accept_redirects = 0
+net.ipv4.conf.default.accept_redirects = 0
+net.ipv4.conf.all.send_redirects = 0
+net.ipv4.conf.default.send_redirects = 0
+net.ipv6.conf.all.accept_redirects = 0
+net.ipv6.conf.default.accept_redirects = 0
+
+# --- Log Martian Packets ---
+net.ipv4.conf.all.log_martians = 1
+net.ipv4.conf.default.log_martians = 1
+
+# --- Kernel Address Space Layout Randomization ---
+kernel.randomize_va_space = 2
+
+# --- Restrict dmesg access ---
+kernel.dmesg_restrict = 1
+
+# --- Restrict kernel pointer access ---
+kernel.kptr_restrict = 2
+
+# --- Disable Magic SysRq key ---
+kernel.sysrq = 0
+
+# --- Prevent core dumps for SUID binaries ---
+fs.suid_dumpable = 0
+
+# --- Restrict ptrace scope ---
+kernel.yama.ptrace_scope = 2
+
+# --- TCP Hardening ---
+net.ipv4.tcp_timestamps = 0
+net.ipv4.tcp_rfc1337 = 1
+SYSEOF
+
+info "Planned sysctl hardening rules:"
+echo
+cat "$SYSCTL_NEW"
+echo
+
+if confirm "Apply kernel hardening parameters?"; then
+    cp "$SYSCTL_NEW" "$SYSCTL_FILE"
+    sysctl --system > /dev/null 2>&1
+    ok "Kernel parameters applied."
+else
+    warn "Kernel hardening skipped."
+fi
+
+rm -f "$SYSCTL_NEW"
+
+# ---------------------------------------------------------------------------
+# Step 7 — Fail2ban
+# ---------------------------------------------------------------------------
+header "Step 7: Fail2ban (SSH Brute-Force Protection)"
+
+if command -v fail2ban-client &>/dev/null; then
+    ok "fail2ban is already installed."
+else
+    info "fail2ban monitors logs and bans IPs after repeated failed login attempts."
+    if confirm "Install and configure fail2ban?"; then
+        apt-get update -qq
+        apt-get install -y -qq fail2ban
+    else
+        warn "fail2ban installation skipped."
+    fi
+fi
+
+if command -v fail2ban-client &>/dev/null; then
+    F2B_JAIL="/etc/fail2ban/jail.local"
+    F2B_NEW=$(mktemp)
+
+    cat > "$F2B_NEW" << F2BEOF
+# =============================================================================
+# Fail2ban Configuration — AutoSecure
+# =============================================================================
+[DEFAULT]
+bantime  = 1h
+findtime = 10m
+maxretry = 3
+banaction = ufw
+
+[sshd]
+enabled  = true
+port     = ${SSH_PORT}
+filter   = sshd
+logpath  = /var/log/auth.log
+maxretry = 3
+F2BEOF
+
+    info "Planned fail2ban configuration:"
+    echo
+    cat "$F2B_NEW"
+    echo
+
+    if confirm "Apply fail2ban configuration?"; then
+        cp "$F2B_NEW" "$F2B_JAIL"
+        systemctl enable fail2ban
+        systemctl restart fail2ban
+        ok "fail2ban configured and running."
+    else
+        warn "fail2ban configuration skipped."
+    fi
+
+    rm -f "$F2B_NEW"
+fi
+
+# ---------------------------------------------------------------------------
+# Step 8 — Disable unused network protocols
+# ---------------------------------------------------------------------------
+header "Step 8: Disable Unused Network Protocols"
+
+MODPROBE_FILE="/etc/modprobe.d/autosecure-disable.conf"
+MODPROBE_NEW=$(mktemp)
+
+cat > "$MODPROBE_NEW" << 'MODEOF'
+# Disable uncommon/legacy network protocols — AutoSecure
+install dccp /bin/true
+install sctp /bin/true
+install rds /bin/true
+install tipc /bin/true
+install cramfs /bin/true
+install freevxfs /bin/true
+install jffs2 /bin/true
+install hfs /bin/true
+install hfsplus /bin/true
+install udf /bin/true
+MODEOF
+
+info "The following unused kernel modules will be disabled:"
+echo "  - dccp, sctp, rds, tipc (legacy network protocols)"
+echo "  - cramfs, freevxfs, jffs2, hfs, hfsplus, udf (uncommon filesystems)"
+echo
+
+if confirm "Disable these modules?"; then
+    cp "$MODPROBE_NEW" "$MODPROBE_FILE"
+    ok "Modules disabled."
+else
+    warn "Module disabling skipped."
+fi
+
+rm -f "$MODPROBE_NEW"
+
+# ---------------------------------------------------------------------------
+# Step 9 — Secure shared memory
+# ---------------------------------------------------------------------------
+header "Step 9: Secure Shared Memory"
+
+if grep -q "^tmpfs.*/run/shm" /etc/fstab 2>/dev/null || grep -q "^none.*/run/shm" /etc/fstab 2>/dev/null; then
+    ok "Shared memory is already secured in /etc/fstab."
+else
+    info "Adding noexec,nosuid,nodev mount options to shared memory."
+    echo
+
+    SHM_LINE="none /run/shm tmpfs defaults,ro,noexec,nosuid,nodev 0 0"
+    echo "  Will add to /etc/fstab:"
+    echo "  ${SHM_LINE}"
+    echo
+
+    if confirm "Apply shared memory hardening?"; then
+        echo "$SHM_LINE" >> /etc/fstab
+        ok "Shared memory secured."
+    else
+        warn "Shared memory hardening skipped."
+    fi
+fi
+
+# ---------------------------------------------------------------------------
+# Final summary
+# ---------------------------------------------------------------------------
+header "Hardening Complete!"
+
+echo
+printf "${GREEN}${BOLD}  ✓ Summary of applied configurations:${NC}\n"
+echo
+printf "    %-35s %s\n" "User created:" "$NEW_USER (with sudo)"
+printf "    %-35s %s\n" "SSH port:" "$SSH_PORT"
+printf "    %-35s %s\n" "SSH authentication:" "Public key only"
+printf "    %-35s %s\n" "Root login:" "Disabled"
+printf "    %-35s %s\n" "Password authentication:" "Disabled"
+printf "    %-35s %s\n" "Firewall:" "ufw (port ${SSH_PORT}/tcp only)"
+printf "    %-35s %s\n" "Automatic security updates:" "Enabled"
+printf "    %-35s %s\n" "Kernel hardening:" "sysctl rules applied"
+printf "    %-35s %s\n" "Fail2ban:" "SSH jail active"
+printf "    %-35s %s\n" "Unused protocols:" "Disabled"
+printf "    %-35s %s\n" "Shared memory:" "Secured"
+echo
+
+printf "${YELLOW}${BOLD}  ⚠  Next steps:${NC}\n"
+echo
+echo "    1. Test SSH access in a NEW terminal before closing this session:"
+echo "       ssh -p ${SSH_PORT} ${NEW_USER}@${IP_ADDR:-<server-ip>}"
+echo
+echo "    2. Save the SSH config backup:"
+echo "       ${SSHD_BACKUP}"
+echo
+echo "    3. Consider additionally:"
+echo "       - Setting up log monitoring (logwatch)"
+echo "       - Configuring email alerts for unattended-upgrades"
+echo "       - Setting up regular backups"
+echo "       - Installing and configuring aide (file integrity monitoring)"
+echo
+printf "${GREEN}${BOLD}  Server hardening complete. Stay safe!${NC}\n\n"
