@@ -255,8 +255,11 @@ printf "  3. Harden SSH: port ${BOLD}%s${NC}, key-only, no root, no password, no
 printf "  4. Configure firewall (ufw) — allow port ${BOLD}%s${NC}/tcp only\n" "$SSH_PORT"
 printf "  5. Install and configure automatic security updates\n"
 printf "  6. Harden kernel parameters (sysctl)\n"
-printf "  7. Set up fail2ban for SSH brute-force protection\n"
+printf "  7. Set up fail2ban with progressive banning\n"
 printf "  8. Disable unused network protocols\n"
+printf "  9. Restrict su access to sudo group\n"
+printf "  10. Disable core dumps\n"
+printf "  11. Check and enable AppArmor\n"
 echo
 
 if ! confirm "Proceed with hardening?"; then
@@ -820,6 +823,98 @@ fi
 rm -f "$MODPROBE_NEW"
 
 # ---------------------------------------------------------------------------
+# Step 9 — Restrict su to sudo group
+# ---------------------------------------------------------------------------
+header "Step 9: Restrict su Access to sudo Group"
+
+info "This restricts the 'su' command to members of the sudo group only."
+info "Other users and compromised services cannot switch to root via su."
+echo
+
+if confirm "Restrict su access to sudo group?"; then
+    PAM_SU="/etc/pam.d/su"
+    if [ -f "$PAM_SU" ]; then
+        if grep -qE "^auth\s+required\s+pam_wheel\.so" "$PAM_SU"; then
+            ok "pam_wheel.so is already enabled."
+        else
+            # Backup original
+            if [ ! -f "${PAM_SU}.autosecure-backup" ]; then
+                cp "$PAM_SU" "${PAM_SU}.autosecure-backup"
+                ok "Backed up ${PAM_SU}"
+            fi
+            # Uncomment the pam_wheel.so line and add group=sudo
+            if grep -qE "^#.*pam_wheel\.so" "$PAM_SU"; then
+                sed -i 's/^#\s*\(auth\s\+required\s\+pam_wheel\.so\).*/\1 group=sudo/' "$PAM_SU"
+            else
+                # Line doesn't exist at all, add it after the first auth line
+                sed -i '/^auth/a auth       required   pam_wheel.so group=sudo' "$PAM_SU"
+            fi
+            ok "su restricted to sudo group."
+        fi
+    else
+        warn "${PAM_SU} not found. Skipping."
+    fi
+else
+    warn "su restriction skipped."
+fi
+
+# ---------------------------------------------------------------------------
+# Step 10 — Disable core dumps
+# ---------------------------------------------------------------------------
+header "Step 10: Disable Core Dumps"
+
+NOCORE_FILE="/etc/security/limits.d/99-autosecure-nocore.conf"
+NOCORE_NEW=$(mktemp)
+
+cat > "$NOCORE_NEW" << 'COREEOF'
+# Disable core dumps — AutoSecure
+# Prevents processes from writing core dump files (security/privacy risk)
+* hard core 0
+COREEOF
+
+if apply_config "Disable Core Dumps" "$NOCORE_FILE" "$NOCORE_NEW"; then
+    ok "Core dumps disabled via limits.d drop-in."
+fi
+
+rm -f "$NOCORE_NEW"
+
+# ---------------------------------------------------------------------------
+# Step 11 — AppArmor
+# ---------------------------------------------------------------------------
+header "Step 11: AppArmor (Mandatory Access Control)"
+
+if command -v aa-status &>/dev/null; then
+    if aa-status --enabled 2>/dev/null; then
+        ok "AppArmor is already active."
+        if [ "$VERBOSE" = true ]; then
+            aa-status 2>/dev/null || true
+        fi
+    else
+        info "AppArmor is installed but not active."
+        if confirm "Enable AppArmor?"; then
+            run systemctl enable apparmor
+            run systemctl start apparmor
+            ok "AppArmor enabled and started."
+        else
+            warn "AppArmor activation skipped."
+        fi
+    fi
+elif [ -d /sys/module/apparmor ]; then
+    info "AppArmor kernel module is loaded but tools are not installed."
+    if confirm "Install apparmor-utils and enable AppArmor?"; then
+        run apt-get update
+        run apt-get install -y apparmor apparmor-utils
+        run systemctl enable apparmor
+        run systemctl start apparmor
+        ok "AppArmor installed and enabled."
+    else
+        warn "AppArmor installation skipped."
+    fi
+else
+    info "AppArmor is not available on this system. Skipping."
+fi
+
+# ---------------------------------------------------------------------------
 # Final summary
 # ---------------------------------------------------------------------------
 header "Hardening Complete!"
@@ -837,6 +932,9 @@ printf "    %-35s %s\n" "Automatic security updates:" "Enabled"
 printf "    %-35s %s\n" "Kernel hardening:" "sysctl rules applied"
 printf "    %-35s %s\n" "Fail2ban:" "SSH jail active (progressive bans)"
 printf "    %-35s %s\n" "Unused protocols:" "Disabled"
+printf "    %-35s %s\n" "su restriction:" "sudo group only"
+printf "    %-35s %s\n" "Core dumps:" "Disabled"
+printf "    %-35s %s\n" "AppArmor:" "Checked/enabled"
 echo
 
 printf "${YELLOW}${BOLD}  ⚠  Next steps:${NC}\n"
@@ -844,13 +942,14 @@ echo
 echo "    1. Test SSH access in a NEW terminal before closing this session:"
 echo "       ssh -p ${SSH_PORT} ${NEW_USER}@${IP_ADDR:-<server-ip>}"
 echo
-echo "    2. To revert SSH hardening, simply remove the drop-in:"
-echo "       rm ${SSHD_DROPIN} && systemctl restart ssh"
+echo "    2. To revert changes:"
+echo "       - SSH:   rm ${SSHD_DROPIN} && systemctl restart ssh"
+echo "       - su:    cp /etc/pam.d/su.autosecure-backup /etc/pam.d/su"
+echo "       - cores: rm /etc/security/limits.d/99-autosecure-nocore.conf"
 echo
 echo "    3. Consider additionally:"
 echo "       - Setting up log monitoring (logwatch)"
-echo "       - Configuring email alerts for unattended-upgrades"
 echo "       - Setting up regular backups"
-echo "       - Installing and configuring aide (file integrity monitoring)"
+echo "       - Installing aide (file integrity monitoring)"
 echo
 printf "${GREEN}${BOLD}  Server hardening complete. Stay safe!${NC}\n\n"
