@@ -30,7 +30,7 @@ confirm() {
     local answer
     while true; do
         printf "${YELLOW}%s [y/n]: ${NC}" "$prompt"
-        read -r answer
+        read -r answer < /dev/tty
         case "$answer" in
             [Yy]*) return 0 ;;
             [Nn]*) return 1 ;;
@@ -181,7 +181,7 @@ header "Configuration"
 # Username
 while true; do
     printf "${BOLD}Enter the username to create: ${NC}"
-    read -r NEW_USER
+    read -r NEW_USER < /dev/tty
     if [[ "$NEW_USER" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]]; then
         break
     else
@@ -192,7 +192,7 @@ done
 # SSH port
 while true; do
     printf "${BOLD}Enter the custom SSH port [1024-65535]: ${NC}"
-    read -r SSH_PORT
+    read -r SSH_PORT < /dev/tty
     if [[ "$SSH_PORT" =~ ^[0-9]+$ ]] && [ "$SSH_PORT" -ge 1024 ] && [ "$SSH_PORT" -le 65535 ]; then
         break
     else
@@ -233,7 +233,7 @@ else
 
     step "Setting password for '${NEW_USER}'..."
     info "You will be prompted to set a password (needed for sudo)."
-    passwd "$NEW_USER"
+    passwd "$NEW_USER" < /dev/tty
 fi
 
 # Add to sudo group
@@ -262,7 +262,7 @@ if [ -f "$AUTH_KEYS" ] && [ -s "$AUTH_KEYS" ]; then
     echo
     if ! confirm "Keep existing keys and skip adding a new one?"; then
         printf "${BOLD}Paste the public SSH key for '${NEW_USER}' (one line):${NC}\n"
-        read -r PUB_KEY
+        read -r PUB_KEY < /dev/tty
         echo "$PUB_KEY" >> "$AUTH_KEYS"
         ok "Key added."
     fi
