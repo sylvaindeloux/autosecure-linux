@@ -477,10 +477,49 @@ if ! apply_config "SSH Drop-in Configuration" "$SSHD_DROPIN" "$SSHD_NEW"; then
     warn "SSH port remains 22 (drop-in was not applied)."
 fi
 
+# Helper to reload/restart SSH (handles both socket and service modes)
+ssh_reload() {
+    if systemctl is-enabled ssh.socket &>/dev/null; then
+        run systemctl daemon-reload
+        run systemctl restart ssh.socket
+        systemctl is-active ssh.service &>/dev/null && run systemctl restart ssh.service || true
+    else
+        run systemctl reload sshd 2>/dev/null || run systemctl reload ssh 2>/dev/null || \
+            run systemctl restart sshd 2>/dev/null || run systemctl restart ssh
+    fi
+}
+
+# Helper to rollback all SSH changes
+ssh_rollback() {
+    warn "Rolling back SSH configuration..."
+    rm -f "$SSHD_DROPIN"
+    rm -f /etc/systemd/system/ssh.socket.d/override.conf
+    rmdir /etc/systemd/system/ssh.socket.d 2>/dev/null || true
+    ssh_reload
+    ok "SSH configuration reverted to defaults."
+    SSH_PORT="22"
+    warn "SSH port reset to 22 for the rest of the configuration."
+}
+
 if [ -f "$SSHD_DROPIN" ]; then
+    # On Ubuntu 24.04+, ssh.socket controls the listening port, not sshd_config.
+    # We must override the socket too, otherwise the port change is ignored.
+    if systemctl is-enabled ssh.socket &>/dev/null; then
+        step "Detected ssh.socket (systemd socket activation)."
+        info "Creating socket override for port ${SSH_PORT}..."
+
+        mkdir -p /etc/systemd/system/ssh.socket.d
+        cat > /etc/systemd/system/ssh.socket.d/override.conf << SOCKEOF
+# SSH socket override — AutoSecure
+[Socket]
+ListenStream=
+ListenStream=${SSH_PORT}
+SOCKEOF
+        ok "Socket override created."
+    fi
+
     step "Reloading SSH service..."
-    run systemctl reload sshd 2>/dev/null || run systemctl reload ssh 2>/dev/null || \
-        run systemctl restart sshd 2>/dev/null || run systemctl restart ssh
+    ssh_reload
     ok "SSH service reloaded on port ${SSH_PORT}."
 
     echo
@@ -490,13 +529,7 @@ if [ -f "$SSHD_DROPIN" ]; then
     echo
 
     if ! confirm "Did SSH access work in another terminal?"; then
-        warn "Rolling back SSH configuration..."
-        rm -f "$SSHD_DROPIN"
-        run systemctl reload sshd 2>/dev/null || run systemctl reload ssh 2>/dev/null || \
-            run systemctl restart sshd 2>/dev/null || run systemctl restart ssh
-        ok "SSH configuration reverted to defaults."
-        SSH_PORT="22"
-        warn "SSH port reset to 22 for the rest of the configuration."
+        ssh_rollback
     fi
 fi
 
@@ -997,7 +1030,8 @@ echo "    1. Test SSH access in a NEW terminal before closing this session:"
 echo "       ssh -p ${SSH_PORT} ${NEW_USER}@${IP_ADDR:-<server-ip>}"
 echo
 echo "    2. To revert changes:"
-echo "       - SSH:   rm ${SSHD_DROPIN} && systemctl reload ssh"
+echo "       - SSH:   rm ${SSHD_DROPIN} && rm -rf /etc/systemd/system/ssh.socket.d"
+echo "                systemctl daemon-reload && systemctl restart ssh.socket"
 echo "       - su:    cp /etc/pam.d/su.autosecure-backup /etc/pam.d/su"
 echo "       - cores: rm /etc/security/limits.d/99-autosecure-nocore.conf"
 echo
