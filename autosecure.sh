@@ -200,6 +200,29 @@ while true; do
     fi
 done
 
+# Alert email
+while true; do
+    printf "${BOLD}Enter an email address for disk space alerts: ${NC}"
+    read -r ALERT_EMAIL < /dev/tty
+    if [[ "$ALERT_EMAIL" =~ ^[^@]+@[^@]+\.[^@]+$ ]]; then
+        break
+    else
+        err "Invalid email address."
+    fi
+done
+
+# Disk threshold
+while true; do
+    printf "${BOLD}Disk usage alert threshold in %% [default: 80]: ${NC}"
+    read -r DISK_THRESHOLD < /dev/tty
+    DISK_THRESHOLD="${DISK_THRESHOLD:-80}"
+    if [[ "$DISK_THRESHOLD" =~ ^[0-9]+$ ]] && [ "$DISK_THRESHOLD" -ge 1 ] && [ "$DISK_THRESHOLD" -le 99 ]; then
+        break
+    else
+        err "Enter a number between 1 and 99."
+    fi
+done
+
 echo
 info "Summary of planned actions:"
 echo
@@ -211,6 +234,7 @@ printf "  5. Install and configure automatic security updates\n"
 printf "  6. Harden kernel parameters (sysctl)\n"
 printf "  7. Set up fail2ban for SSH brute-force protection\n"
 printf "  8. Disable unused network protocols\n"
+printf "  9. Disk space monitoring (alert at ${BOLD}%s%%${NC} to ${BOLD}%s${NC})\n" "$DISK_THRESHOLD" "$ALERT_EMAIL"
 echo
 
 if ! confirm "Proceed with hardening?"; then
@@ -712,6 +736,101 @@ fi
 rm -f "$MODPROBE_NEW"
 
 # ---------------------------------------------------------------------------
+# Step 9 — Disk space monitoring
+# ---------------------------------------------------------------------------
+header "Step 9: Disk Space Monitoring"
+
+# Ensure mail is available
+if ! command -v mail &>/dev/null; then
+    step "Installing mailutils (required to send email alerts)..."
+    apt-get update -qq
+    apt-get install -y -qq mailutils
+fi
+
+MONITOR_SCRIPT="/usr/local/bin/autosecure-diskmon"
+MONITOR_NEW=$(mktemp)
+
+cat > "$MONITOR_NEW" << 'DISKEOF'
+#!/usr/bin/env bash
+# =============================================================================
+# Disk Space Monitor — AutoSecure
+# Checks all mounted partitions and sends an email alert if any exceed
+# the configured threshold. Designed to run via cron.
+# =============================================================================
+THRESHOLD="__THRESHOLD__"
+ALERT_EMAIL="__EMAIL__"
+HOSTNAME=$(hostname)
+
+ALERT_BODY=""
+
+while read -r line; do
+    USAGE=$(echo "$line" | awk '{print $5}' | tr -d '%')
+    MOUNT=$(echo "$line" | awk '{print $6}')
+    FILESYSTEM=$(echo "$line" | awk '{print $1}')
+    SIZE=$(echo "$line" | awk '{print $2}')
+    USED=$(echo "$line" | awk '{print $3}')
+    AVAIL=$(echo "$line" | awk '{print $4}')
+
+    if [ "$USAGE" -ge "$THRESHOLD" ]; then
+        ALERT_BODY="${ALERT_BODY}
+  ${MOUNT}
+    Filesystem:  ${FILESYSTEM}
+    Usage:       ${USAGE}% (threshold: ${THRESHOLD}%)
+    Size:        ${SIZE}
+    Used:        ${USED}
+    Available:   ${AVAIL}
+"
+    fi
+done < <(df -h --output=source,size,used,avail,pcent,target -x tmpfs -x devtmpfs -x squashfs 2>/dev/null | tail -n +2)
+
+if [ -n "$ALERT_BODY" ]; then
+    mail -s "[AutoSecure] Disk space alert on ${HOSTNAME}" "$ALERT_EMAIL" << EOF
+Disk space alert on ${HOSTNAME} at $(date)
+
+The following partitions have exceeded ${THRESHOLD}% usage:
+${ALERT_BODY}
+--
+AutoSecure disk monitor
+EOF
+fi
+DISKEOF
+
+# Replace placeholders
+sed -i "s/__THRESHOLD__/${DISK_THRESHOLD}/" "$MONITOR_NEW"
+sed -i "s/__EMAIL__/${ALERT_EMAIL}/" "$MONITOR_NEW"
+
+info "Monitoring script to install at ${MONITOR_SCRIPT}:"
+echo
+cat "$MONITOR_NEW"
+echo
+
+info "A cron job will run this script every hour."
+echo
+
+if confirm "Install disk space monitoring?"; then
+    cp "$MONITOR_NEW" "$MONITOR_SCRIPT"
+    chmod +x "$MONITOR_SCRIPT"
+    ok "Script installed at ${MONITOR_SCRIPT}."
+
+    # Install cron job (avoid duplicates)
+    CRON_LINE="0 * * * * ${MONITOR_SCRIPT}"
+    if crontab -l 2>/dev/null | grep -qF "$MONITOR_SCRIPT"; then
+        ok "Cron job already exists."
+    else
+        (crontab -l 2>/dev/null; echo "$CRON_LINE") | crontab -
+        ok "Cron job installed (runs every hour)."
+    fi
+
+    step "Running a test check now..."
+    bash "$MONITOR_SCRIPT"
+    ok "Test check completed. If a partition exceeds ${DISK_THRESHOLD}%, an email was sent to ${ALERT_EMAIL}."
+else
+    warn "Disk monitoring skipped."
+fi
+
+rm -f "$MONITOR_NEW"
+
+# ---------------------------------------------------------------------------
 # Final summary
 # ---------------------------------------------------------------------------
 header "Hardening Complete!"
@@ -729,6 +848,7 @@ printf "    %-35s %s\n" "Automatic security updates:" "Enabled"
 printf "    %-35s %s\n" "Kernel hardening:" "sysctl rules applied"
 printf "    %-35s %s\n" "Fail2ban:" "SSH jail active"
 printf "    %-35s %s\n" "Unused protocols:" "Disabled"
+printf "    %-35s %s\n" "Disk monitoring:" "Every hour, alert at ${DISK_THRESHOLD}% to ${ALERT_EMAIL}"
 echo
 
 printf "${YELLOW}${BOLD}  ⚠  Next steps:${NC}\n"

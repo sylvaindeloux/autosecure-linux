@@ -26,6 +26,7 @@ The script is fully interactive — it shows you every change and asks for confi
 | 6 | Harden kernel parameters (sysctl) |
 | 7 | Install fail2ban (SSH brute-force protection) |
 | 8 | Disable unused network protocols and filesystems |
+| 9 | Disk space monitoring with email alerts (cron) |
 
 ## Requirements
 
