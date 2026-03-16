@@ -33,8 +33,8 @@ jobs:
 
           # Patterns that should never appear in a hardening script
           DANGEROUS_PATTERNS=(
-            'curl.*|.*sh'           # Piped remote execution inside the script
-            'wget.*|.*sh'           # Same with wget
+            'curl.*\|.*sh'          # Piped remote execution inside the script
+            'wget.*\|.*sh'          # Same with wget
             'eval.*\$\('            # eval with command substitution
             'base64.*--decode'      # Obfuscated payloads
             'nc\s.*-e'             # Reverse shells via netcat
@@ -84,8 +84,8 @@ jobs:
           echo ""
           echo "=== Checking for credential exposure ==="
 
-          # Hardcoded passwords or tokens
-          if grep -Pin '(password|token|secret|api_key)\s*=' autosecure.sh | grep -v '^#'; then
+          # Hardcoded passwords or tokens (ignore SSH config directives and comments)
+          if grep -Pin '(password|token|secret|api_key)\s*=' autosecure.sh | grep -v '^\s*#' | grep -vi 'Authentication'; then
             echo "::error::Possible hardcoded credentials"
             EXIT_CODE=1
           fi
