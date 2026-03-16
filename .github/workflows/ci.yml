@@ -1,0 +1,107 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  shellcheck:
+    name: ShellCheck Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run ShellCheck
+        run: shellcheck --severity=warning --shell=bash autosecure.sh
+
+  security-scan:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check for dangerous patterns
+        run: |
+          EXIT_CODE=0
+
+          echo "=== Checking for suspicious commands ==="
+
+          # Patterns that should never appear in a hardening script
+          DANGEROUS_PATTERNS=(
+            'curl.*|.*sh'           # Piped remote execution inside the script
+            'wget.*|.*sh'           # Same with wget
+            'eval.*\$\('            # eval with command substitution
+            'base64.*--decode'      # Obfuscated payloads
+            'nc\s.*-e'             # Reverse shells via netcat
+            '/dev/tcp/'             # Bash reverse shells
+            'mkfifo.*/tmp/'         # Named pipe reverse shells
+            'python.*-c.*import.*socket'  # Python reverse shells
+            'nohup.*&'              # Background persistence
+            'crontab.*http'         # Cron fetching remote code
+          )
+
+          for pattern in "${DANGEROUS_PATTERNS[@]}"; do
+            if grep -Pn "$pattern" autosecure.sh; then
+              echo "::error::Suspicious pattern found: $pattern"
+              EXIT_CODE=1
+            fi
+          done
+
+          echo ""
+          echo "=== Checking for hardcoded IPs/domains ==="
+
+          # Flag any hardcoded IPs (except 0.0.0.0 and localhost ranges)
+          if grep -Pn '\b(?!0\.0\.0\.0|127\.0\.0\.1|10\.\d|192\.168)\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b' autosecure.sh; then
+            echo "::warning::Hardcoded IP addresses found — verify they are expected"
+          fi
+
+          # Flag any URLs (the script should not phone home)
+          if grep -Pn 'https?://' autosecure.sh; then
+            echo "::error::URLs found in script — the script should not fetch remote resources"
+            EXIT_CODE=1
+          fi
+
+          echo ""
+          echo "=== Checking for permission issues ==="
+
+          # World-writable files/dirs
+          if grep -Pn 'chmod.*777' autosecure.sh; then
+            echo "::error::chmod 777 found — overly permissive"
+            EXIT_CODE=1
+          fi
+
+          # SUID/SGID bits
+          if grep -Pn 'chmod.*[ugo]\+s' autosecure.sh; then
+            echo "::error::SUID/SGID bit being set"
+            EXIT_CODE=1
+          fi
+
+          echo ""
+          echo "=== Checking for credential exposure ==="
+
+          # Hardcoded passwords or tokens
+          if grep -Pin '(password|token|secret|api_key)\s*=' autosecure.sh | grep -v '^#'; then
+            echo "::error::Possible hardcoded credentials"
+            EXIT_CODE=1
+          fi
+
+          if [ "$EXIT_CODE" -eq 0 ]; then
+            echo ""
+            echo "All security checks passed."
+          fi
+
+          exit $EXIT_CODE
+
+  syntax-check:
+    name: Bash Syntax Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate bash syntax
+        run: bash -n autosecure.sh
